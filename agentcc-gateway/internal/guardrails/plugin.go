@@ -54,6 +54,26 @@ func NewPlugin(engine *Engine, registry map[string]Guardrail, dynamicFactory Dyn
 	}
 }
 
+// NewPlugin creates a new guardrail pipeline plugin.
+func NewPlugin(engine *Engine, registry map[string]Guardrail, dynamicFactory DynamicFactory, policyStore *policy.Store, tenantStore *tenant.Store) *GuardrailPlugin {
+	timeout := 30 * time.Second
+	failOpen := false
+	if engine != nil {
+		timeout = engine.DefaultTimeout()
+		failOpen = engine.FailOpen()
+	}
+	return &GuardrailPlugin{
+		engine:         engine,
+		registry:       registry,
+		dynamicFactory: dynamicFactory,
+		policyStore:    policyStore,
+		tenantStore:    tenantStore,
+		failOpen:       failOpen,
+		defaultTimeout: timeout,
+		dynamicCache:   make(map[string]map[string]Guardrail),
+	}
+}
+
 func (p *GuardrailPlugin) Name() string  { return "guardrails" }
 func (p *GuardrailPlugin) Priority() int { return 50 } // After auth (20), RBAC (30), budget (40). Before cache (200).
 
@@ -217,6 +237,25 @@ func (p *GuardrailPlugin) runOrgGuardrails(ctx context.Context, rc *models.Reque
 				"threshold", threshold,
 				"message", cr.Message,
 			)
+		case ActionMask:
+			// ActionMask: allow request but log masked data
+			redactedMsg := "***"
+			slog.Info("guardrail triggered (mask mode)",
+				"guardrail", name,
+				"org_id", orgID,
+				"score", cr.Score,
+				"threshold", threshold,
+				"message", redactedMsg,
+			)
+			// Build TriggeredGuardrail with redacted message for metadata and trace
+			tg := TriggeredGuardrail{
+				Name:      name,
+				Score:     cr.Score,
+				Threshold: threshold,
+				Action:    action,
+				Message:   redactedMsg,
+			}
+			result.Triggered = append(result.Triggered, tg)
 		}
 	}
 
@@ -286,7 +325,6 @@ func (p *GuardrailPlugin) getGuardrail(orgID, name string, check *tenant.Guardra
 	if g == nil {
 		return nil
 	}
-
 	return g
 }
 
@@ -299,7 +337,6 @@ func (p *GuardrailPlugin) getCachedDynamicGuardrail(orgID, name string) Guardrai
 			return g
 		}
 	}
-
 	return nil
 }
 
@@ -325,7 +362,6 @@ func (p *GuardrailPlugin) createDynamicGuardrail(orgID, name string, cfg map[str
 		"name", name,
 		"org_id", orgID,
 	)
-
 	return g
 }
 
@@ -525,6 +561,8 @@ func actionString(a Action) string {
 		return "warn"
 	case ActionLog:
 		return "log"
+	case ActionMask:
+		return "mask"
 	default:
 		return "unknown"
 	}
